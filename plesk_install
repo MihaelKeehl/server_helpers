@@ -1,0 +1,72 @@
+#!/bin/bash
+
+#By Juri 10/2016
+
+PORTnic=$(ip -o link show | awk '{print $2,$9}' | grep UP | awk '{print $1}' | sed 's/:.*//')
+IPaddress1=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0' | head -n 1)
+#IPaddress1=$(ip addr | grep 'state UP' -A2 | tail -n1 | awk '{print $2}' | cut -f1  -d'/')
+#IPaddress1=$(echo `ifconfig eth0 2>/dev/null|awk '/inet addr:/ {print $2}'|sed 's/addr://'`)
+#IPaddress1=$(ip -4 -o addr show dev ${PORTnic}| awk '{split($4,a,"/");print a[1]}')
+#IPaddress1=$(ip -o link show | awk '{print $2,$9}' | grep UP | awk '{print $1}' | sed 's/:.*//')
+#IPaddress1=$(hostname -I | cut -d' ' -f1)
+
+#OStype=$(cat /etc/*release | tail -1)
+OSfirstNumber=$(cat /etc/*release | grep "PRETTY_NAME" | sed 's/PRETTY_NAME=//g' | grep -o -E '[0-9]+' | head -1 | sed -e 's/^0\+//')
+
+if [ -d /etc/sysconfig/network-scripts/ ] ; then
+IFS=. read ip1 ip2 ip3 ip4 <<< "$IPaddress1"
+unset IFS
+hostnameToSet1="host-${ip1}-${ip2}-${ip3}-${ip4}.rsclientdns.com"
+sed -i '/^HOSTNAME=/s/=.*/=${hostnameToSet1}/' /etc/sysconfig/network
+
+OSfirstNumber2=$(rpm -q --qf "%{VERSION}" $(rpm -q --whatprovides redhat-release) | sed -e 's/^0\+//')
+
+if [[ $OSfirstNumber = 7 || $OSfirstNumber2 = 7 ]] ; then
+echo "Centos 7.x"
+systemctl stop firewalld &> /dev/null
+systemctl disable firewalld &> /dev/null
+#firewall-cmd --add-service=http --permanent && firewall-cmd --add-service=https --permanent && \
+#firewall-cmd --add-port=8443/tcp --permanent && firewall-cmd --reload
+hostnamectl set-hostname $hostnameToSet1
+
+else
+echo "Centos 6.x"
+hostname $hostnameToSet1
+iptables -A INPUT -p tcp  --match multiport --dports 80,443,8443 -j ACCEPT &> /dev/null
+#/etc/init.d/iptables save &> /dev/null
+service iptables save &> /dev/null
+fi
+
+sed -i '/^SELINUX=/s/=.*/=disabled/'  /etc/selinux/config
+setenforce 0
+
+else
+echo "Debian-Ubuntu"
+ip1=${IPaddress1%%.*} && IPaddress2=${IPaddress1#*.*}
+ip2=${IPaddress2%%.*} && IPaddress2=${IPaddress2#*.*}
+ip3=${IPaddress2%%.*} && IPaddress2=${IPaddress2#*.*}
+ip4=${IPaddress2%%.*}
+hostnameToSet1="host-${ip1}-${ip2}-${ip3}-${ip4}.rsclientdns.com"
+
+if [ $(which ufw 2>/dev/null | grep -v "not found" | wc -l) = 0 ] ; then
+iptables -A INPUT -p tcp  --match multiport --dports 80,443,8443 -j ACCEPT &> /dev/null
+/etc/init.d/iptables save &> /dev/null
+iptables-save > /etc/iptables.rules ; else
+ufw allow 80/tcp &> /dev/null
+ufw allow 443/tcp &> /dev/null
+ufw allow 8443/tcp &> /dev/null
+fi
+fi
+
+sed "/$IPaddress1/d" /etc/hosts &> /dev/null
+echo "$IPaddress1   $hostnameToSet1" >> /etc/hosts
+
+if [ -f /etc/hostname ] ; then
+echo "$hostnameToSet1" > /etc/hostname
+fi
+
+
+#cd /tmp
+wget -q -O latest http://autoinstall.plesk.com/one-click-installer
+echo "Starting Plesk install..."
+sh latest

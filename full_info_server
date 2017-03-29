@@ -1,1 +1,351 @@
-/var/www/io/qc.sh
+#!/bin/bash
+
+# Tested on
+# r210, perc h200, centos6 + ubuntu 14 (drac6)
+# r510, perc h700, ubuntu 14 (drac6)
+# r810, perc h710, debian8
+# perc h730- ubuntu 14
+# HP Proliant DL320 G6, ubuntu 14 (ilo3?), centos6
+# supermicro, centos7+debian8 (ipmi)
+
+# Needs to check for bm installer leftovers
+# use hpe repo instead when possible for hps
+# 
+
+# cd /tmp && wget -q http://82.145.59.203/projects/qcscript/Tools/qc/qc.sh -O qc.sh && bash qc.sh 
+
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+
+NC='\033[0m' # No Color
+
+PACKAGES_TO_INSTALL="ipmitool nano screen pciutils dmidecode gawk curl wget curl unzip"
+DEBIAN_SPECIFIC_PACKAGES="lsb-release software-properties-common python-software-properties"
+CENTOS_SPECIFIC_PACKAGES="redhat-lsb bind-utils net-tools"
+
+
+command_exists () {
+    type "$1" &> /dev/null ;
+}
+
+
+installHelpfullStuff() { # nano/screen/ipmitool
+  echo -e ${YELLOW}"Installing helpers"${NC}
+  if [ "$SYSTEM_TYPE" == "Debian" ]; then
+        apt-get update -y > /dev/null
+  fi
+
+  $PACKAGE_INSTALL_COMMAND $PACKAGES_TO_INSTALL > /dev/null | sed 's/^/  /'
+
+  curl -s https://raw.githubusercontent.com/smxi/inxi/master/inxi > inxi
+  chmod +x inxi
+#  wget https://raw.githubusercontent.com/IntellexApps/blcheck/master/blcheck
+#  chmod +x blcheck
+
+  # grab files
+  mkdir -p repofiles
+  curl -s http://82.145.59.203/projects/qcscript/Tools/qc/repofiles/mcp.repo > ./repofiles/mcp.repo
+  mkdir -p scripts
+  curl -s http://82.145.59.203/projects/qcscript/Tools/qc/scripts/aacraid-status > ./scripts/aacraid-status
+  chmod +x ./scripts/aacraid-status
+  curl -s http://82.145.59.203/projects/qcscript/Tools/qc/scripts/hpacucli-status > ./scripts/hpacucli-status
+  chmod +x ./scripts/hpacucli-status
+}
+
+setupRaidRepoDebian() {
+  apt-get update -y > /dev/null
+  apt-get install -y software-properties-common > /dev/null
+  add-apt-repository -r http://hwraid.le-vert.net/$(lsb_release -is  | awk '{print tolower($0)}')
+  add-apt-repository http://hwraid.le-vert.net/$(lsb_release -is  | awk '{print tolower($0)}')
+  wget -qO - http://hwraid.le-vert.net/debian/hwraid.le-vert.net.gpg.key | apt-key add - > /dev/null
+  apt-get update -y > /dev/null
+}
+
+setupRaidRepoCentos() {
+  # add repo for raid rpms, needs --enablerepo=nux-misc yum switch
+  curl -s http://li.nux.ro/download/nux/misc/nux-misc.repo > /etc/yum.repos.d/nux-misc.repo
+}
+
+checkRaid() { # need to detect any raid controllers and grab scripts / packages for em
+  echo -e ${YELLOW}"Checking raid"${NC}
+  echo -e ${RED}"If no output and raid controller present, speak to danny"${NC}
+  PCIIDS=$(lspci -kn)
+
+  # check for anything using aacraid driver, (2405)
+  if echo $PCIIDS -k | grep -Fq "aacraid"
+  then
+    if [ "$SYSTEM_TYPE" == "Debian" ]; then
+      # Install the tools if needed
+      if !(command_exists aacraid-status); then
+        echo "Installing utils.."
+        setupRaidRepoDebian
+        apt-get install -y aacraid-status > /dev/null
+      fi
+      aacraid-status | awk 'f{print;f=1} /Arrays info/{f=1}' | sed 's/^/    /' # todo fix disk parsing
+    fi
+
+    if [ "$SYSTEM_TYPE" == "Centos" ]; then
+      # Install the tools if needed
+      if !(command_exists ./arcconf/linux_x64/cmdline/arcconf); then
+        echo "Installing utils.."
+         curl -s wget http://download.adaptec.com/raid/storage_manager/arcconf_v1_7_21229.zip > arcconf.zip
+         unzip -o arcconf.zip -d arcconf > /dev/null
+         chmod +x ./arcconf/linux_x64/cmdline/arcconf
+      fi
+      ./scripts/aacraid-status | awk 'f{print;f=1} /Arrays info/{f=1}' | sed 's/^/    /'
+    fi
+    
+  fi
+
+  # check for h200/lsi sas2008 , anything using mpt2sas driver
+  if echo $PCIIDS -k | grep -Fq "mpt2sas"
+  then
+    echo H200/lsi sas2008 detected | sed 's/^/  /'
+    echo "Installing utils " | sed 's/^/  /'
+    if [ "$SYSTEM_TYPE" == "Debian" ]; then
+      # Install the tools if needed
+      if !(command_exists sas2ircu-status); then
+        setupRaidRepoDebian
+        apt-get install -y sas2ircu-status > /dev/null
+      fi
+      # Installed now
+      sas2ircu-status | awk 'f{print;f=1} /Arrays/{f=1}' | sed 's/^/    /'
+      # TODO get individual disks etc      
+    else
+      # Install the tools if needed
+      if !(command_exists ./sas2ircu-status); then
+        setupRaidRepoCentos
+        yum install -y --enablerepo=nux-misc sas2ircu > /dev/null
+        # Doesn't include sas2ircu-status!
+        curl -s https://raw.githubusercontent.com/eLvErDe/hwraid/master/wrapper-scripts/sas2ircu-status > sas2ircu-status
+        chmod +x sas2ircu-status
+      fi
+      ./sas2ircu-status | awk 'f{print;f=1} /Arrays/{f=1}' | sed 's/^/    /'
+    fi
+  fi
+
+
+  # check for perc h700 - new method
+  if echo $PCIIDS -k | grep -Fq "megaraid_sas"
+  then
+    if [ "$SYSTEM_TYPE" == "Debian" ]; then
+      # Install the tools if needed
+      if !(command_exists ./megaclisas-status); then
+        echo "Installing utils.."
+        setupRaidRepoDebian
+		# why does this drag in postfix anyway.. it breaks the qc
+        #apt-get install -y megaclisas-status > /dev/null
+		curl -s  http://82.145.59.203/projects/qcscript/Tools/qc/packages/megacli_8.07.14-2_all.deb > megacli.deb
+		dpkg -i megacli.deb > /dev/null
+		curl -s https://raw.githubusercontent.com/eLvErDe/hwraid/master/wrapper-scripts/megaclisas-status > megaclisas-status
+        chmod +x megaclisas-status
+      fi
+      ./megaclisas-status | awk 'f{print;f=1} /Array info/{f=1}' | sed 's/^/    /'
+    fi
+
+    if [ "$SYSTEM_TYPE" == "Centos" ]; then
+      # Install the tools if needed
+      if !(command_exists ./megaclisas-status); then
+        echo "Installing utils.."
+        curl -s https://www.broadcom.com/docs-and-downloads/raid-controllers/raid-controllers-common-files/8-07-14_MegaCLI.zip > MegaCLI.zip
+        unzip -o MegaCLI.zip > /dev/null
+        rpm --quiet -Uhv Linux/MegaCli-8.07.14-1.noarch.rpm > /dev/null
+        curl -s https://raw.githubusercontent.com/eLvErDe/hwraid/master/wrapper-scripts/megaclisas-status > megaclisas-status
+        chmod +x megaclisas-status
+      fi
+      ./megaclisas-status | awk 'f{print;f=1} /Array info/{f=1}' | sed 's/^/    /'
+    fi
+    
+  fi
+
+  # check for hp smart arrays (p410)
+  # todo, make this use the hpe repo instead and use hpssacli
+  if echo $PCIIDS -k | grep -Fq "hpsa"
+  then
+    if [ "$SYSTEM_TYPE" == "Debian" ]; then
+      # Install the tools if needed
+      if !(command_exists hpacucli); then
+        echo "Installing utils.."
+        setupRaidRepoDebian
+        apt-get install -y hpacucli > /dev/null
+        curl -s https://gist.githubusercontent.com/clienthax/ac7d430ab05a1da932390f2995c341da/raw/7c745e4728c84af76b84f41319e82af1fc3ec194/hpacucli-status > hpaucli-status
+      fi
+      ./scripts/hpacucli-status | awk 'f{print;f=1} /Arrays info/{f=1}' | sed 's/^/    /' # fix this to have nice output =3
+    fi
+
+    if [ "$SYSTEM_TYPE" == "Centos" ]; then
+      # Install the tools if needed
+      if !(command_exists hpssacli); then
+        echo "Installing utils.."
+        cp ./repofiles/mcp.repo /etc/yum.repos.d/
+        yum install -y hpssacli > / dev/null	
+      fi
+      ./scripts/hpacucli-status | awk 'f{print;f=1} /Arrays info/{f=1}' | sed 's/^/    /' # fix this to have nice output =3
+    fi
+
+  fi
+
+}
+
+checkCpu() {
+  echo -e ${YELLOW}"Checking Processors"${NC}
+  ./inxi -c 5 -C  | sed 's/^/  /'
+  echo ""
+}
+
+checkNetwork() {
+  echo -e ${YELLOW}"Checking networking"${NC}
+  ./inxi -c 5 -Nn  | sed 's/^/  /'
+  echo ""
+}
+
+checkRootSshEnabled() { # needed on ubuntu
+  echo -e ${YELLOW}"Checking root SSH Login is Enabled"${NC}
+  sed -n '/^PermitRootLogin/p' /etc/ssh/sshd_config | sed 's/^/  /'
+}
+
+checkDrives() {
+  echo -e ${YELLOW}"Checking Drives"${NC}
+  ./inxi -c 5 -D | sed 's/^/  /'
+  echo ""
+}
+
+checkMounts() { #check if all drives are mounted~
+  echo -e ${YELLOW}"Checking Mounts"${NC}
+  ./inxi -c 5 -P | sed 's/^/  /'
+  echo ""
+}
+
+checkSystemType() {
+  echo -e ${YELLOW}"Checking System Type"${NC}
+  if command_exists apt-get ; then
+    export SYSTEM_TYPE="Debian" # debian/ubuntu
+    export PACKAGE_INSTALL_COMMAND="apt-get install -y "
+    PACKAGES_TO_INSTALL=$PACKAGES_TO_INSTALL" "$DEBIAN_SPECIFIC_PACKAGES
+  fi
+  if command_exists yum ; then
+    export SYSTEM_TYPE="Centos"
+    export PACKAGE_INSTALL_COMMAND="yum install -y "
+    PACKAGES_TO_INSTALL=$PACKAGES_TO_INSTALL" "$CENTOS_SPECIFIC_PACKAGES
+  fi
+
+  installHelpfullStuff
+
+  echo "OS: "$(lsb_release -ds) | sed 's/^/  /'
+  echo "Bits: "$(arch) | sed 's/^/  /'
+
+}
+
+checkUpdates() { # apply bios updates?
+  echo todo
+}
+
+checkIPBlacklists() { # broken on centos 7 min due to wierd output
+  while read x ; do
+    echo  -e ${YELLOW}"Checking blacklist for "$x ${NC}
+    ./blcheck2.sh $x  | sed 's/^/  /'
+  done <<< "$(ifconfig | awk -F "[: ]+" '/inet addr:/ { if ($4 != "127.0.0.1") print $4 }')"
+}
+
+listIpmiDetails() {
+# need to get shared/dedi too, prob needs diff code for ilo/drac/ipmi --  ipmitool bmc info
+  echo -e ${YELLOW}"Checking BMC"${NC}
+
+  # Hps just in case code..
+  modprobe ipmi_devintf
+  modprobe ipmi_si
+
+  BMCTYPE=$(ipmitool bmc info | grep "Manufacturer Name" | sed -n -e 's/^.*: //p')
+  echo "Detected Bmc type: "$BMCTYPE | sed 's/^/  /'
+
+
+  if [ "$BMCTYPE" == "DELL Inc" ]; then
+    echo "Drac Specific Info" | sed 's/^/  /'
+    echo "Port mode               : "$(ipmitool delloem lan get) | sed 's/^/    /'
+    echo "Port used               :"$(ipmitool delloem lan get active) | sed 's/^/    /'
+  # Generic commands
+    ipmitool lan print 1 | egrep -e "IP Address|Subnet|Default Gateway IP" | sed 's/^/    /'
+    echo "Users" | sed 's/^/  /'
+    ipmitool user list 1 | sed 's/^/    /'
+  elif [ "$BMCTYPE" == "Hewlett-Packard" ]; then
+    # Do ilos support shared mode ?
+    # Hp uses slot 2 for unknown reasons..
+    ipmitool lan print 2 | egrep -e "IP Address|Subnet|Default Gateway IP" | sed 's/^/    /'
+    echo "Users" | sed 's/^/  /'
+    ipmitool user list 2 | sed 's/^/    /'
+    # todo, update ilos in here..
+  elif [ "$BMCTYPE" == "Supermicro" ]; then
+
+    echo "Ipmi Specific Info" | sed 's/^/  /'
+    echo "Port mode (0=dedicated, 1=shared, 2=failover) :" $(ipmitool raw 0x30 0x70 0x0c 0) | sed 's/^/  /'
+
+    # Generic commands
+    ipmitool lan print 1 | egrep -e "IP Address|Subnet|Default Gateway IP" | sed 's/^/    /'
+    echo "Users" | sed 's/^/  /'
+    ipmitool user list 1 | sed 's/^/    /'
+  elif [ "$BMCTYPE" == "someothercrap" ]; then
+    echo ohi
+  else
+    echo "Unknown bmc type "$BMCTYPE
+  fi
+  
+}
+
+
+checkPanels() { #check for cpanel/plesk
+  echo -e ${YELLOW}"Checking for control panels"${NC}
+  x=$(/usr/local/cpanel/cpanel -V 2>/dev/null)
+  if [ "$x" ]; then
+    echo "  Cpanel: Installed"
+  else
+    echo "  Cpanel: Missing"
+  fi
+   
+  if [ -d "/etc/psa/" ]; then    
+    echo "  Plesk: Installed"
+  else
+    echo "  Plesk: Missing"    
+  fi
+}
+
+checkRisFiles() {
+  echo -e ${YELLOW}"Checking for leftover ris files"${NC}
+  if [ -d "/root/RapidSwitchInstaller" ]; then
+    echo -e ${RED}"Leftover ris files found in /root/RapidSwitchInstaller"${NC} | sed 's/^/    /'
+  else
+    echo -e "No leftover files found in /root/RapidSwitchInstaller" | sed 's/^/    /'
+  fi  
+}
+
+listChassisInfo() {
+  echo -e ${YELLOW}"Chassis Info"${NC}
+  ./inxi -c 5 -M | sed 's/^/  /'
+  echo ""
+  
+}
+
+listRamInfo() {
+  echo -e ${YELLOW}"Memory Info"${NC}
+  ./inxi -c 5 -m  | sed 's/^/  /'
+  echo ""
+}
+
+
+echo -e ${RED}"QC Script"${NC}
+# go to a temp place
+mkdir -p /tmp/qcscript
+cd /tmp/qcscript
+
+checkSystemType
+listChassisInfo
+checkCpu
+listRamInfo
+checkPanels
+checkMounts
+checkRootSshEnabled
+#checkIPBlacklists # works, takes a while
+checkDrives
+checkRaid # works needs work for a few cards
+checkNetwork
+listIpmiDetails
+checkRisFiles

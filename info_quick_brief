@@ -1,1 +1,74 @@
-/var/www/io/info.sh
+#!/bin/bash
+
+#By Juri 03/2017
+
+red=$'\033[0;31m'
+grn=$'\033[0;32m'
+yel=$'\033[0;33m'
+blu=$'\033[0;94m'
+mag=$'\033[0;35m'
+cyn=$'\033[0;36m'
+end=$'\033[0m'
+
+
+CPUtype=$(cat /proc/cpuinfo | grep "model name" | tail -1)
+CPUnumber=$(echo $(($(grep "^physical id" /proc/cpuinfo | awk '{print $4}' | sort -un | tail -1)+1)))
+CPUcores=$(cat /proc/cpuinfo | grep "cpu cores" | sort -u | cut -d: -f2)
+RAMtype=$(getconf -a | grep PAGES | awk 'BEGIN {total = 1} {if (NR == 1 || NR == 3) total *=$NF} END {printf "%.1f GB\n", total / 1073741824}')
+#RAMtype=$(dmidecode -t 17 | awk '( /Size/ && $2 ~ /^[0-9]+$/ ) { x+=$2 } END{ print "\t" "Installed Ram: " x "MB"}')
+motherboardModel=$(dmidecode -s baseboard-product-name | head -1)
+chassisManufacurer=$(dmidecode -s baseboard-manufacturer | head -1)
+chassisSerialNumber=$(dmidecode -s baseboard-serial-number | head -1)
+
+PORTnic=$(ip -o link show | awk '{print $2,$9}' | grep UP | awk '{print $1}' | sed 's/:.*//' | head -1)
+
+if [ $(which ethtool 2>/dev/null | grep -v "not found" | wc -l) = 1 ] ; then
+PORTspeed=$(ethtool $PORTnic | grep Speed)
+PORTduplex=$(ethtool $PORTnic | grep Duplex)
+PORTtype="$PORTspeed $PORTduplex"
+else
+PORTspeed=$(</sys/class/net/${PORTnic}/speed)
+PORTduplex=$(</sys/class/net/${PORTnic}/duplex)
+PORTtype="$PORTspeed Mb $PORTduplex"
+fi
+
+if [ -d /etc/sysconfig/network-scripts/ ] ; then
+OStype=$(cat /etc/*release | tail -1)
+else
+OStype=$(lsb_release -d 2>/dev/null | sed 's/Description://g' | sed -e 's/^[ \t]*//')
+fi
+
+printf "%sOS:%s %s \n" "$grn" "$end" "$OStype"
+
+printf "%sChassis:%s %s %s \n" "$blu" "$end" "$chassisManufacurer" "$motherboardModel"
+printf "%sSerial Number:%s %s \n" "$blu" "$end" "$chassisSerialNumber"
+
+printf "%sCPU:%s %s \n" "$mag" "$end" "$CPUtype"
+printf "%sNumber of CPUs:%s %s   -- and --   %sCores in each CPU:%s %s \n" "$mag" "$end" "$CPUnumber" "$mag" "$end" "$CPUcores"
+
+printf "%sRAM amount:%s %s \n" "$yel" "$end" "$RAMtype"
+
+printf "%sDuplex Speed:%s %s \n" "$cyn" "$end" "$PORTtype"
+
+cpanelstatus=$(/usr/local/cpanel/cpanel -V 2>/dev/null)
+if [ "$cpanelstatus" ]; then
+printf "\n%sCpanel is installed%s %s \n" "$grn" "$end"
+fi
+if [ -d "/etc/psa/" ]; then
+printf "\n%sPlesk is installed%s %s \n" "$grn" "$end"
+fi
+
+printf "\n%sDisks and partitions:%s\n" "$yel" "$end"
+
+lsblk --output NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT,MODEL -n
+
+
+# Checking port duplex speed and changing
+[[ $PORTduplex == half ]] && printf "\n >>>>>>\n%s>> DUPLEX is HALF !!! Please change swtch port settings.%s \n" "$red" "$end"
+
+if [ -d "/root/RapidSwitchInstaller" ]; then
+printf "\n >>>>>>\n%s>> RIS Scripts are left in the:%s /root/RapidSwitchInstaller \n" "$red" "$end"
+echo "Please run [ sh /root/RapidSwitchInstaller/Remove* ] command"
+fi
+
+
